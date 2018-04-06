@@ -6,7 +6,7 @@ TARGET = MIC-ARRAY-1V0
 # The APP_NAME variable determines the name of the final .xe file. It should
 # not include the .xe postfix. If left blank the name will default to
 # the project name
-APP_NAME = app_vu
+APP_NAME = app_vu_dBC_slow
 
 # The USED_MODULES variable lists other module used by the application.
 USED_MODULES = lib_i2c(>=4.0.0) lib_i2s(>=2.2.0) lib_mic_array(>=3.0.0) lib_mic_array_board_support(>=2.1.0)

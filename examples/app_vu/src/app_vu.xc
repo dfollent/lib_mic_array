@@ -1,11 +1,12 @@
 // Copyright (c) 2016-2017, XMOS Ltd, All rights reserved
+unsafe{
 #include <platform.h>
 #include <xs1.h>
-#include <string.h>
 #include <xclib.h>
 #include <xscope.h>
 
 #include <stdio.h>
+#include <string.h>
 #include "mic_array.h"
 #include "mic_array_board_support.h"
 #include "dsp.h"
@@ -26,6 +27,22 @@ on tile[0]: out port p_pdm_clk              = XS1_PORT_1E;
 on tile[0]: in buffered port:32 p_pdm_mics  = XS1_PORT_8B;
 on tile[0]: in port p_mclk                  = XS1_PORT_1F;
 on tile[0]: clock pdmclk                    = XS1_CLKBLK_1;
+
+/*
+   AKU441
+   116dbSPL = 0  dbFS = 2**32-1  linear power
+    94dBSPL = -26dBFS = 10788470 linear power
+    62dbSPL = -54dbFS = 6807     linear power
+              -89dbFS = 5        linear power (noise floor, a weighted)
+
+    Brand x
+   130dbSPL = 0  dbFS = 2**32-1  linear power
+    94dBSPL = -36dBFS = 1078847  linear power
+             -105dbFS = 5        linear power (noise floor, a weighted)
+
+*/
+
+const uint32_t mic_spl_offset = 120 + 6 + 3.2;
 
 const int32_t filter_coeffs_A_weight[] = {
     125794161,  251588322,  125794161,  120558903,  -6768130,
@@ -102,19 +119,6 @@ void update_power(uint64_t &lpf_p, uint32_t alpha, uint64_t p){
     lpf_p = l+r;
 }
 
-/*
-   AKU441
-   116dbSPL = 0  dbFS = 2**32-1  linear power
-    94dBSPL = -26dBFS = 10788470 linear power
-    62dbSPL = -54dbFS = 6807     linear power
-              -89dbFS = 5        linear power (noise floor, a weighted)
-
-    Brand x
-   130dbSPL = 0  dbFS = 2**32-1  linear power
-    94dBSPL = -36dBFS = 1078847  linear power
-             -105dbFS = 5        linear power (noise floor, a weighted)
-
-*/
 void vu(streaming chanend c_ds_output[DECIMATOR_COUNT],
         client interface mabs_led_button_if lb, chanend c_printer) {
 
@@ -153,17 +157,17 @@ void vu(streaming chanend c_ds_output[DECIMATOR_COUNT],
             mic_array_frame_time_domain *  current =
                 mic_array_get_next_time_domain_frame(c_ds_output, DECIMATOR_COUNT, buffer, audio, dc);
 
-            int32_t v = current->data[selected_ch][0];
+            int32_t value = current->data[selected_ch][0];
 
-            v = v >> 1; // To ensure the gain of the A weighting never overflows,
+            value = value >> 1; // To ensure the gain of the A weighting never overflows,
                         // equlivant to -6.02dB.
 
-            int32_t a = dsp_filters_biquads(v, filter_coeffs_A_weight,
+            int32_t a = dsp_filters_biquads(value, filter_coeffs_A_weight,
                     filter_state_A_weight, num_sections_A_weight, q_format_A_weight);
-            int32_t c = dsp_filters_biquads(v, filter_coeffs_C_weight,
+            int32_t c = dsp_filters_biquads(value, filter_coeffs_C_weight,
                     filter_state_C_weight, num_sections_C_weight, q_format_C_weight);
 
-            uint64_t pV = power(v);
+            uint64_t pV = power(value);
             update_power(pZ_slow, alpha_slow, pV);
             update_power(pZ_fast, alpha_fast, pV);
 
@@ -176,24 +180,24 @@ void vu(streaming chanend c_ds_output[DECIMATOR_COUNT],
             update_power(pC_fast, alpha_fast, pC);
 
             q8_24 dB_pZ_slow = log2_to_log10(uint64_log2(pZ_slow));
-            dB_pZ_slow = dB_pZ_slow*10 + Q24(6.02); //+6.02dB to undo the above
+            dB_pZ_slow = dB_pZ_slow*10 + Q24(6.02 + mic_spl_offset); //+6.02dB to undo the above
 
             q8_24 dB_pZ_fast = log2_to_log10(uint64_log2(pZ_fast));
-            dB_pZ_fast = dB_pZ_fast*10 + Q24(6.02);
+            dB_pZ_fast = dB_pZ_fast*10 + Q24(6.02 + mic_spl_offset);
 
             q8_24 dB_pA_slow = log2_to_log10(uint64_log2(pA_slow));
-            dB_pA_slow = dB_pA_slow*10 + Q24(6.02);
+            dB_pA_slow = dB_pA_slow*10 + Q24(6.02 + mic_spl_offset);
 
             q8_24 dB_pA_fast = log2_to_log10(uint64_log2(pA_fast));
-            dB_pA_fast = dB_pA_fast*10 + Q24(6.02);
+            dB_pA_fast = dB_pA_fast*10 + Q24(6.02 + mic_spl_offset);
 
             q8_24 dB_pC_slow = log2_to_log10(uint64_log2(pC_slow));
-            dB_pC_slow = dB_pC_slow*10 + Q24(6.02);
+            dB_pC_slow = dB_pC_slow*10 + Q24(6.02 + mic_spl_offset);
 
             q8_24 dB_pC_fast = log2_to_log10(uint64_log2(pC_fast));
-            dB_pC_fast = dB_pC_fast*10 + Q24(6.02);
+            dB_pC_fast = dB_pC_fast*10 + Q24(6.02 + mic_spl_offset);
 
-            if(counter == (sample_rate/16)){
+            if(counter >= (sample_rate/16)){
                 master{
                     c_printer <: dB_pZ_slow;
                     c_printer <: dB_pZ_fast;
@@ -211,17 +215,29 @@ void vu(streaming chanend c_ds_output[DECIMATOR_COUNT],
 }
 
 void printer(chanend c_printer){
-    q8_24 v[6];
+    q8_24 value[6];
+    int index = 4;
+    // if(strcmp(config, "zslow") == 0) index = 0;
+    // else if(strcmp(config, "zfast") == 0) index = 1;
+    // else if(strcmp(config, "aslow") == 0) index = 2;
+    // else if(strcmp(config, "afast") == 0) index = 3;
+    // else if(strcmp(config, "cslow") == 0) index = 4;
+    // else if(strcmp(config, "cfast") == 0) index = 5;
+    // else{
+    //   printf("Unrecognised config: %s. Defaulting to zslow.\n", config);
+    // }
+
     while(1){
         slave{
             for(unsigned i=0;i<6;i++){
-                c_printer :> v[i];
+                c_printer :> value[i];
             }
         }
-        for(unsigned i=0;i<6;i++){
-            printf("%f ", F24(v[i]));
-//            xscope_float(i, F24(v[i]));
-        }
+//         for(unsigned i=0;i<6;i++){
+//             printf("%.1f ", F24(v[i]));
+// //            xscope_float(i, F24(v[i]));
+//         }
+        printf("%.1f ", F24(value[index]));
         printf("\n");
     }
 }
@@ -231,6 +247,7 @@ void printer(chanend c_printer){
 int main() {
 
     i2c_master_if i_i2c[1];
+
     par {
 
         on tile[1]:  [[distribute]]i2c_master_single_port(i_i2c, 1, p_i2c, 100, 0, 1, 0);
@@ -246,17 +263,23 @@ int main() {
             streaming chan c_4x_pdm_mic[DECIMATOR_COUNT];
             streaming chan c_ds_output[DECIMATOR_COUNT];
 
+            // char * config = (char *)argV[argC-1];
+
             interface mabs_led_button_if lb[1];
             chan c_printer;
             par {
+                printer(c_printer);
                 mabs_button_and_led_server(lb, 1, leds, p_buttons);
                 mic_array_pdm_rx(p_pdm_mics, c_4x_pdm_mic[0], c_4x_pdm_mic[1]);
                 mic_array_decimate_to_pcm_4ch(c_4x_pdm_mic[0], c_ds_output[0], MIC_ARRAY_NO_INTERNAL_CHANS);
                 mic_array_decimate_to_pcm_4ch(c_4x_pdm_mic[1], c_ds_output[1], MIC_ARRAY_NO_INTERNAL_CHANS);
                 vu(c_ds_output, lb[0], c_printer);
-                printer(c_printer);
+                // unsafe{
+                //printer(c_printer, argC? argV[argC-1] : 0);
+                // }
             }
         }
     }
     return 0;
+}
 }
