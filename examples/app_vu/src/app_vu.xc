@@ -42,7 +42,9 @@ on tile[0]: clock pdmclk                    = XS1_CLKBLK_1;
 
 */
 
-const uint32_t mic_spl_offset = 120 + 6 + 3.2;
+const uint32_t mic_spl_offset = 120;
+const uint32_t mic_dBC_offset = 7.3;
+const uint32_t mic_dBA_offset = 5.7;
 
 const int32_t filter_coeffs_A_weight[] = {
     125794161,  251588322,  125794161,  120558903,  -6768130,
@@ -86,17 +88,18 @@ q8_24 uint64_log2(uint64_t r){
 }
 
 q8_24 log2_to_log10(const q8_24 i){
-    const int32_t d = 1292913986; // (1.0/log2(10)) * (2^(31 + 1)-1)
-    return ((int64_t)d * (int64_t)i)>>(31+1);
+    const int32_t d = 1292913986; // (1.0/log2(10)) * (2^(32)-1)
+    int64_t val = ((int64_t)d * (int64_t)i)>>(32);
+    return val;
 }
 
-int64_t power(int32_t v){
+uint64_t power(int32_t v){
     uint64_t p =  (int64_t)v*(int64_t)v;
     p<<=1;
     return p;
 }
 
-void update_power(uint64_t &lpf_p, uint32_t alpha, uint64_t p){
+void low_pass_filter(uint64_t &lpf_p, uint32_t alpha, uint64_t p){
 
     uint64_t lpf_p_top = lpf_p >> 32;
     uint64_t lpf_p_bot = lpf_p&0xffffffff;
@@ -142,13 +145,13 @@ void vu(streaming chanend c_ds_output[DECIMATOR_COUNT],
 
         unsigned selected_ch = 0;
 
-        uint64_t pZ_slow = 0, pZ_fast = 0;
-        uint64_t pA_slow = 0, pA_fast = 0;
-        uint64_t pC_slow = 0, pC_fast = 0;
+        // Initialise to roughly 40dBC
+        uint64_t pZ_slow = 1000000000000, pZ_fast = 1000000000000;
+        uint64_t pA_slow = 1000000000000, pA_fast = 1000000000000;
+        uint64_t pC_slow = 1000000000000, pC_fast = 1000000000000;
 
-        //TODO give these exponential decay rates meaning.
-        uint32_t alpha_slow = (int64_t)((double)UINT_MAX * 0.01);
-        uint32_t alpha_fast = (int64_t)((double)UINT_MAX * 0.1);
+        uint32_t alpha_slow = (uint32_t)((double)UINT_MAX * 0.0001);
+        uint32_t alpha_fast = (uint32_t)((double)UINT_MAX * 0.001); 
 
         unsigned sample_rate = 48000;
         unsigned counter = 0;
@@ -159,8 +162,9 @@ void vu(streaming chanend c_ds_output[DECIMATOR_COUNT],
 
             int32_t value = current->data[selected_ch][0];
 
+
             value = value >> 1; // To ensure the gain of the A weighting never overflows,
-                        // equlivant to -6.02dB.
+                                // equlivant to -6.02dB.
 
             int32_t a = dsp_filters_biquads(value, filter_coeffs_A_weight,
                     filter_state_A_weight, num_sections_A_weight, q_format_A_weight);
@@ -168,43 +172,43 @@ void vu(streaming chanend c_ds_output[DECIMATOR_COUNT],
                     filter_state_C_weight, num_sections_C_weight, q_format_C_weight);
 
             uint64_t pV = power(value);
-            update_power(pZ_slow, alpha_slow, pV);
-            update_power(pZ_fast, alpha_fast, pV);
+            low_pass_filter(pZ_slow, alpha_slow, pV);
+            low_pass_filter(pZ_fast, alpha_fast, pV);
 
             uint64_t pA = power(a);
-            update_power(pA_slow, alpha_slow, pA);
-            update_power(pA_fast, alpha_fast, pA);
+            low_pass_filter(pA_slow, alpha_slow, pA);
+            low_pass_filter(pA_fast, alpha_fast, pA);
 
             uint64_t pC = power(c);
-            update_power(pC_slow, alpha_slow, pC);
-            update_power(pC_fast, alpha_fast, pC);
+            low_pass_filter(pC_slow, alpha_slow, pC);
+            low_pass_filter(pC_fast, alpha_fast, pC);
 
             q8_24 dB_pZ_slow = log2_to_log10(uint64_log2(pZ_slow));
-            dB_pZ_slow = dB_pZ_slow*10 + Q24(6.02 + mic_spl_offset); //+6.02dB to undo the above
+            dB_pZ_slow = dB_pZ_slow*10  + Q24(6.02 + mic_spl_offset);
 
             q8_24 dB_pZ_fast = log2_to_log10(uint64_log2(pZ_fast));
             dB_pZ_fast = dB_pZ_fast*10 + Q24(6.02 + mic_spl_offset);
 
             q8_24 dB_pA_slow = log2_to_log10(uint64_log2(pA_slow));
-            dB_pA_slow = dB_pA_slow*10 + Q24(6.02 + mic_spl_offset);
+            dB_pA_slow = dB_pA_slow*10 + Q24(6.02 + mic_spl_offset + mic_dBA_offset);
 
             q8_24 dB_pA_fast = log2_to_log10(uint64_log2(pA_fast));
-            dB_pA_fast = dB_pA_fast*10 + Q24(6.02 + mic_spl_offset);
+            dB_pA_fast = dB_pA_fast*10 + Q24(6.02 + mic_spl_offset + mic_dBA_offset);
 
             q8_24 dB_pC_slow = log2_to_log10(uint64_log2(pC_slow));
-            dB_pC_slow = dB_pC_slow*10 + Q24(6.02 + mic_spl_offset);
+            dB_pC_slow = dB_pC_slow*10 + Q24(6.02 + mic_spl_offset + mic_dBC_offset);
 
             q8_24 dB_pC_fast = log2_to_log10(uint64_log2(pC_fast));
-            dB_pC_fast = dB_pC_fast*10 + Q24(6.02 + mic_spl_offset);
+            dB_pC_fast = dB_pC_fast*10 + Q24(6.02 + mic_spl_offset + mic_dBC_offset);
 
             if(counter >= (sample_rate/16)){
                 master{
-                    c_printer <: dB_pZ_slow;
-                    c_printer <: dB_pZ_fast;
-                    c_printer <: dB_pA_slow;
-                    c_printer <: dB_pA_fast;
+                    //c_printer <: dB_pZ_slow;
+                    //c_printer <: dB_pZ_fast;
+                    //c_printer <: dB_pA_slow;
+                    //c_printer <: dB_pA_fast;
                     c_printer <: dB_pC_slow;
-                    c_printer <: dB_pC_fast;
+                    //c_printer <: dB_pC_fast;
                 }
                 counter = 0;
             } else {
@@ -214,30 +218,19 @@ void vu(streaming chanend c_ds_output[DECIMATOR_COUNT],
     }
 }
 
+#define N_VALUES 1
 void printer(chanend c_printer){
-    q8_24 value[6];
-    int index = 4;
-    // if(strcmp(config, "zslow") == 0) index = 0;
-    // else if(strcmp(config, "zfast") == 0) index = 1;
-    // else if(strcmp(config, "aslow") == 0) index = 2;
-    // else if(strcmp(config, "afast") == 0) index = 3;
-    // else if(strcmp(config, "cslow") == 0) index = 4;
-    // else if(strcmp(config, "cfast") == 0) index = 5;
-    // else{
-    //   printf("Unrecognised config: %s. Defaulting to zslow.\n", config);
-    // }
+    q8_24 value[N_VALUES];
 
     while(1){
         slave{
-            for(unsigned i=0;i<6;i++){
+            for(unsigned i=0;i<N_VALUES;i++){
                 c_printer :> value[i];
             }
         }
-//         for(unsigned i=0;i<6;i++){
-//             printf("%.1f ", F24(v[i]));
-// //            xscope_float(i, F24(v[i]));
-//         }
-        printf("%.1f ", F24(value[index]));
+        for(unsigned i=0;i<N_VALUES;i++){
+           printf("%.2f, ", F24(value[i]));
+        }
         printf("\n");
     }
 }
